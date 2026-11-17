@@ -43,10 +43,28 @@ export const defaultPrompts = (): PromptConfig => ({ ...teamDefaults, skills: {}
 
 const ENVIRONMENT_HEADING = 'Execution environment (from this installation\'s settings; it takes precedence over any repository or account named elsewhere in these instructions; an empty value means that part is not configured here). The prepare command of a ticket directory reads the same variables:'
 const POLICY_HEAD = '## Policy\nPolicy version {version}; accept mode {mode}. The accept mode and the rules decide proactive candidates only: an explicit request is routed as dispatch says, in any mode and whatever the rules.'
+const LOCAL_DELIVERY = 'Deliver reviewed changes and verified test results in the local project. The host delivers the worker’s user-facing Markdown in the originating Feishu thread, or to the specific follow-up it answers.'
+const LOCAL_COMMUNICATION = `Answer the person's actual request in their language. Lead with the conclusion, then include the evidence, steps, examples or limitations that help them use or verify it.
+For technical questions, give the requested technical detail. For code changes, name the relevant files and the checks actually run when useful. Distinguish verified results from remaining work.
+Match the length to the question. Use Markdown headings, lists or code blocks when they improve readability. Keep routine progress, tool traces, raw identifiers and internal routing details out of the user-facing reply.
+If you need the person to act, ask one concrete question and explain the information or access that is needed.`
+const LOCAL_REPLIES = `## replies
+For a finished Feishu request, the worker calls orchestrator_report with state=ready, a summary for the ticket record, and reply_markdown containing the complete answer written directly to the person.
+Write reply_markdown as your own final response. It may be longer than a status notification. Include the useful findings, concrete examples, and qualifications the question calls for. The host sends it as written.
+If the answer is for a specific human follow-up, include its original reply_to_trigger_id. When you have answered a follow-up and the main task is still in progress, report progress with both reply_to_trigger_id and reply_markdown. Keep other progress internal.
+Use human_action for a question that needs a person's decision, without reply_markdown in that same report.
+The host handles delivery and retries. The orchestrator coordinates the work and uses orchestrator_reply for structured questions and older worker reports without reply_markdown. When the host has queued the worker's answer, the orchestrator must send no separate result for it.
+Acknowledgements and orchestrator-written status notices remain concise. Use the original trigger and the conversation it belongs to. Never guess a recipient or post private task content elsewhere.`
+const LOCAL_WORK = `## work
+Read the original task and any truncated context via orchestrator_read. Follow the named project's instructions and inspect its current working tree before editing. Preserve pre-existing changes and stay within the ticket scope.
+For a question, read enough context to support a direct answer. For a requested change, implement it, review your diff, and run relevant checks. Keep work in the local files and omit pr_number in orchestrator_report.
+Report ready with the files changed, the checks actually run, and any remaining limitations. Report a concrete blocker or one question for the owner if you cannot proceed. Use progress for internal updates and dropped when no work remains.
+For follow-ups on this ticket's threads, handle requests within the scope and acknowledge them through orchestrator_ack. Include reply_to_trigger_id for a direct answer. Return out-of-scope requests through orchestrator_trigger_handback. Use orchestrator_thread_unrelated for an unrelated thread that was attached after dispatch.`
 type Role = 'orchestrator' | 'worker'
 /** A built-in part a team may override: the roles that read it, its text, and the placeholders a template's override keeps. */
 interface BuiltInPart { roles: readonly Role[]; text: string; placeholders?: readonly string[] }
 const BOTH: readonly Role[] = ['orchestrator', 'worker'], MAIN: readonly Role[] = ['orchestrator'], WORKER: readonly Role[] = ['worker']
+const LOCAL_PARTS: Partial<Record<PartKey, string>> = { 'runtime/work': LOCAL_WORK, 'runtime/replies': LOCAL_REPLIES }
 let parts: Readonly<Record<PartKey, BuiltInPart>> | undefined
 /**
  * The built-in parts of both roles' prompts, the two Source skills, and the templates of the generated parts, whose data the
@@ -99,12 +117,23 @@ export function policySection(settings: Settings, config: PromptConfig = default
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
  * and, last, the main Session's generated Policy section, which nothing follows, and whose change leaves the rest unchanged.
  */
-export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }) {
+export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, localProjectDir?: string) {
   // A built-in part names the key its text is overridden by, which for the handoff names the role.
-  const fixed = (name: string, part = name) => ({ name, kind: 'fixed' as const, key: part, text: builtIn(config, part as PartKey) })
-  const team = (name: TeamSection) => ({ name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`,
-    text: config[name] ? `## ${TEAM_HEADINGS[name]}\n${config[name]}` : '' })
+  const fixed = (name: string, part = name) => {
+    const local = localProjectDir && !config.overrides?.[part] ? LOCAL_PARTS[part as PartKey] : undefined
+    return { name, kind: 'fixed' as const, key: part, text: local ?? builtIn(config, part as PartKey) }
+  }
+  const team = (name: TeamSection) => {
+    const local = name === 'delivery' ? LOCAL_DELIVERY : name === 'communication' ? LOCAL_COMMUNICATION : undefined
+    const text = localProjectDir && local !== undefined && config[name] === teamDefaults[name] ? local : config[name]
+    return { name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`, text: text ? `## ${TEAM_HEADINGS[name]}\n${text}` : '' }
+  }
+  const localScope = role === 'worker'
+    ? 'Use DSH_SUPERAGENT_DIR as the Session working directory. If it is a project subfolder, keep file and test work inside it. If it is the configured project root, use the subfolder named in the assignment. When the target is ambiguous, report one human_action question asking which subfolder to use before editing. Finish with orchestrator_report and omit pr_number.'
+    : 'Dispatch through orchestrator_route. Put the exact project subfolder named by the sender in the routing note and use worktree_name as a short ticket label. The host resolves a leading project selector such as 项目 sample-app。 to the working directory. When the project is ambiguous, tell the worker to obtain the exact subfolder through a human_action question before editing. The host delivers worker-authored reply_markdown; use the existing handoff for reports without it.'
   return [
+    ...localProjectDir ? [{ name: 'runtime/local-project', kind: 'generated' as const, key: 'runtime/local-project',
+      text: `## Local project\nThe configured root containing project folders is ${JSON.stringify(localProjectDir)}. This mode uses Feishu for assignment and delivery. Instructions about GitHub, remote reviews, CI, commit, branch creation, push, or PR publication do not apply. Leave edits in the project files without committing, pushing, or publishing code. Preserve uncommitted changes unrelated to the task.\n${localScope}` }] : [],
     fixed('runtime/shared'), fixed(`runtime/${role}`),
     ...TEAM_SECTIONS.map(team),
     ...['subscriptions', 'replies', role === 'orchestrator' ? 'dispatch' : 'work'].map(name => fixed(`runtime/${name}`)),
@@ -114,8 +143,8 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
     ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : [],
   ].filter(part => part.text)
 }
-export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
-  return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
+export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, localProjectDir?: string): string {
+  return promptParts(config, role, environment, policy, localProjectDir).map(part => part.text).join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
   return name === 'feishu' || name === 'github' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
@@ -135,16 +164,18 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean) {
+    private readonly feishu: () => boolean, private readonly localProjectDir?: string) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined,
+      this.localProjectDir)
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return [...this.feishu() ? ['feishu'] : [], 'github', ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
+    return [...this.feishu() ? ['feishu'] : [], ...this.localProjectDir ? [] : ['github'], ...Object.keys(config.skills)]
+      .map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
     const revision = this.versions.revision()
@@ -195,8 +226,10 @@ export class Prompts {
   preview(value: unknown) {
     const config = this.validate(value)
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
-    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
-      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
+    const orchestrator = promptParts(config, 'orchestrator', environment, policy, this.localProjectDir)
+    const worker = promptParts(config, 'worker', environment, undefined, this.localProjectDir)
+    return { orchestrator: orchestrator.map(part => part.text).join('\n\n'), worker: worker.map(part => part.text).join('\n\n'),
+      parts: { orchestrator, worker },
       skills: Object.fromEntries(this.skills(config)), scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {

@@ -19,6 +19,7 @@ const MembersSchema = z.looseObject({
   has_more: z.boolean(), truncations: z.array(z.unknown()).optional(),
 })
 const FeishuConfigSchema = FeishuBotSchema.extend({
+  recoverHistory: z.boolean().default(true),
   readPageSize: z.number().int().min(1).max(50).default(20),
   linkTimeoutMs: z.number().int().min(1).max(90000).default(5000),
   chats: z.array(z.object({ chatId: z.string().regex(/^oc_[a-zA-Z0-9]+$/), name: z.string().trim().max(60).optional(), listen: z.enum(['mentions', 'all']) }).strict())
@@ -46,6 +47,8 @@ export const feishuKind: SourceKind<FeishuConfig> = {
     { key: 'otherChats', type: 'select', label: { zh: '其他群', en: 'Other chats' }, options: [{ value: 'none', label: { zh: '不接收', en: 'Not received' } }, { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }],
       hint: { zh: '机器人已加入、但没列在上面的群。“仅 @”接收那里 @ 机器人的消息；谁的消息能发起工作看策略里的准入。', en: 'Chats the bot has joined that are not listed above. "@ only" receives messages there that mention the bot; whose messages may originate work is the Policy\'s admission.' } },
     { key: 'directMessages', type: 'switch', label: { zh: '接收私聊', en: 'Direct messages' } },
+    { key: 'recoverHistory', type: 'switch', advanced: true, label: { zh: '补收历史消息', en: 'Recover missed messages' },
+      hint: { zh: '通过轮询补收错过的群消息和线程回复，需要机器人有历史消息权限。关闭后仍接收实时事件。', en: 'Poll chat history and threads for missed messages. This requires history access. Live events continue when this is off.' } },
     { key: 'readPageSize', type: 'number', advanced: true, min: 1, max: 50, label: { zh: '每页消息数', en: 'Messages per page' }, hint: { zh: '智能体读取线程和群历史时，每页的消息数。', en: 'Messages per page when agents read Threads and chat history.' } },
     { key: 'linkTimeoutMs', type: 'number', advanced: true, min: 1, max: 90000, label: { zh: '原消息链接的查询时限 / 毫秒', en: 'Original message link time limit / ms' },
       hint: { zh: '查询原消息链接最多等待的时间；超时后智能体改为直接读取原消息。', en: 'How long to wait for an original message\'s link; after that, agents read the message itself.' } },
@@ -133,7 +136,8 @@ export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(feishuKind), 'feishu: source kind')
   ctx.effect(() => {
     const controller = new AbortController()
-    const running = runFeishu(sourceContext(ctx.orchestrator, feishuKind), controller.signal)
+    const running = runFeishu(sourceContext(ctx.orchestrator, feishuKind), controller.signal,
+      error => ctx.logger.warn('Feishu activity indicator: %s', String(error)))
     return async () => { controller.abort(); await running }
   })
 }

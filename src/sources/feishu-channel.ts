@@ -1,7 +1,7 @@
 /** Feishu outbound channel: posts threaded bot replies and constructs chat deep links. */
 import type { OutboundMessage } from '../core/index.ts'
 import { CliError } from '../infra/commands.ts'
-import { checkedImText } from '../infra/text.ts'
+import { checkedImText, feishuWorkerContent } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
 import { feishuTriggerId } from './feishu-trigger.ts'
@@ -19,8 +19,9 @@ const gone = (error: unknown): boolean => error instanceof CliError && error.cod
 export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu reply target')
-  const text = checkedImText(message.text)
-  const reply = ['im', '+messages-reply', '--message-id', messageId, '--markdown', text, '--reply-in-thread', '--idempotency-key', message.id]
+  const content = message.format === 'worker-markdown' ? ['--msg-type', 'post', '--content', feishuWorkerContent(message.text)]
+    : ['--markdown', checkedImText(message.text)]
+  const reply = ['im', '+messages-reply', '--message-id', messageId, ...content, '--reply-in-thread', '--idempotency-key', message.id]
   try { await host.commands.lark(reply) }
   catch (error) {
     if (gone(error)) return 'gone'

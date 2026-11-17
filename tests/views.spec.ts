@@ -106,6 +106,10 @@ it('states each Source by the first state that holds', () => {
   expect(states({}, { feishu: { state: 'ready', detail: '' }, history: { state: 'paused', detail: '' }, github: { state: 'error',
     detail: 'x' } }))
     .toEqual({ feishu: 'paused', github: 'error' })
+  expect(states({}, { feishu: { state: 'ready', detail: '' }, history: { state: 'paused', code: 'feishuHistoryDisabled', detail: '' } }).feishu)
+    .toBe('ready')
+  expect(states({}, { feishu: { state: 'ready', detail: '' }, history: { state: 'error', detail: 'Permission denied' } }).feishu)
+    .toBe('error')
   const problem = { place: 'deployment', code: 'stateDirUnset', values: {}, detail: '' } as never
   expect(states({ problem }, { feishu: { state: 'ready', detail: '' }, history: { state: 'ready', detail: '' }, github: { state: 'ready',
     detail: '' } }))

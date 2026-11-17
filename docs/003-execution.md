@@ -56,9 +56,11 @@ A failed command fails the Ticket and records its output. A retry or a person's 
 
 A Ticket holds a worker slot from the start of a launch, including preparation, or from the delivery that wakes its idle Executor. It also holds the slot throughout an active turn.
 
-The configured concurrency limit applies to these slots, with one extra slot for a person's message or a status request. Such a wake can use the extra slot when normal slots are full, and takes the next free slot before a new launch. New work therefore cannot prevent a person from continuing an existing Ticket.
+The configured concurrency limit applies to these slots. In repository mode, there is one extra slot for a person's message or a status request. Such a wake can use the extra slot when normal slots are full, and takes the next free slot before a new launch.
 
 Other Inputs, such as CI results, wait for a normal slot. A launch waits in `working / queued` until a slot is free. Launches run concurrently, so a slow prepare command delays only its own Ticket.
+
+In local mode all launches and wakes use the normal slots. A ticket also needs its local project workspace to be idle. The queue starts eligible tickets in order, so a blocked project leaves room for another project to start. Work scoped to the local root overlaps every project below it. A running turn, its background jobs, and its subagents keep their project's workspace reserved.
 
 ### Execution variables
 

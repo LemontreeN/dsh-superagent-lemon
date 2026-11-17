@@ -18,10 +18,10 @@ export type DeploymentForm = ConfigPageForm | undefined
 type Op = Parameters<ConfigPageForm['mutate']>[0][number]
 
 const MACHINE_LIMITS = ['promptMaxChars', 'admissionContextMaxPages', 'admissionContextTimeoutMs'] as const
-type Limits = Record<typeof MACHINE_LIMITS[number], string>
+type DeploymentValues = Record<typeof MACHINE_LIMITS[number], string> & { localProjectDir: string }
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value) : ''
-const limitsOf = (values: object | undefined): Limits =>
-  Object.fromEntries(MACHINE_LIMITS.map(key => [key, text((values as Record<string, unknown> | undefined)?.[key])])) as Limits
+const valuesOf = (values: object | undefined): DeploymentValues =>
+  Object.fromEntries([...MACHINE_LIMITS, 'localProjectDir'].map(key => [key, text((values as Record<string, unknown> | undefined)?.[key])])) as DeploymentValues
 
 export function usePageForm(form: ConfigForm<Record<string, unknown>> | undefined): DeploymentForm {
   const subscribe = useCallback((listener: () => void) => form ? form.subscribe(listener) : () => {}, [form])
@@ -35,11 +35,15 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
   const snapshot = form?.state
   const editable = snapshot?.status === 'ready' && snapshot.writable
   // Pass `revision` only while DSH serves writable values so a draft started before `ready` rebases once writable.
-  const draft = useDraft({ saved: limitsOf(editable ? snapshot.value : setup.machine), revision: editable ? snapshot.revision : undefined,
+  const draft = useDraft({ saved: valuesOf(editable ? snapshot.value : setup.machine), revision: editable ? snapshot.revision : undefined,
     reload: async () => {},
     save: async (value, revision, base) => {
       const ops: Op[] = MACHINE_LIMITS.filter(key => value[key].trim() !== base[key].trim())
         .map(key => value[key].trim() ? { op: 'set', path: [key], value: Number(value[key]) } : { op: 'unset', path: [key] })
+      if (value.localProjectDir.trim() !== base.localProjectDir.trim()) {
+        const directory = value.localProjectDir.trim()
+        ops.push(directory ? { op: 'set', path: ['localProjectDir'], value: directory } : { op: 'unset', path: ['localProjectDir'] })
+      }
       if (!form || !await form.mutate(ops, revision)) throw new Error(t('deploymentRefused'))
       notify(t('saved'))
       return { revision: revision + 1, restarting: false }
@@ -63,7 +67,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       </div>}
       {showAccounts && <Section title={t('deploymentDerived')} hint={t('deploymentDerivedHint')}>
         <KeyValues rows={[[t('deploymentRepository'), accounts?.repository ?? '—'],
-          [t('deploymentAgent'), accounts ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
+          [t('deploymentAgent'), accounts?.agent ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>
@@ -72,6 +76,10 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
           <span className="dt-field-head">{t('deploymentStateDir')}<InfoTip text={t('deploymentStateDirHint')} /></span>
           <span className="dt-mono">{setup.machine.stateDir}</span>
         </div>
+        <Field label={t('deploymentLocalProject')} hint={t('deploymentLocalProjectHint')}>
+          <Input value={draft.value.localProjectDir} disabled={!editable}
+            onChange={event => draft.edit({ ...draft.value, localProjectDir: event.target.value })} />
+        </Field>
       </Section>
       <Section title={t('deploymentLimits')} hint={t('deploymentLimitsHint')}>
         {limit('promptMaxChars', t('deploymentPromptMaxChars'))}

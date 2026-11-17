@@ -263,6 +263,7 @@ export class MasterAssessor implements Assessor {
         body = JSON.stringify({ images: references, next_read: next, ...result.body })
       }
       else {
+        if (!this.host.deployment.github) throw new Error('Assign the task to a worker to inspect the local project.')
         body = await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
       }
       snapshots.set(cacheKey, body)
