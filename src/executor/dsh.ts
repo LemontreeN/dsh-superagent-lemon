@@ -94,13 +94,13 @@ function canonicalDirectory(path: string, resolve: (path: string) => string = re
   } catch { return undefined }
 }
 
-/** Honor only an explicit leading project selector in the original Feishu mention, never a routing note. */
-function localWorkspace(root: string, trigger: Trigger | undefined): string {
+/** Resolves a direct child workspace, with an explicit selector taking precedence over the router's project field. */
+function localWorkspace(root: string, trigger: Trigger | undefined, routedProject?: string): string {
   if (trigger?.source !== 'feishu' || trigger.addressed !== 'mention') return root
   const text = trigger.text.trimStart().replace(/^(?:@[^\s@]+\s+|<at user_id="[^"\r\n]+">[^<]*<\/at>\s*)*/u, '')
   const prefix = /^项目(?:[ \t]*[:：][ \t]*|[ \t]+)/u.exec(text)
-  if (!prefix) return root
-  const project = text.slice(prefix[0].length).split(/[\s，,。；;、！!？?]/u, 1)[0]!
+  const project = prefix ? text.slice(prefix[0].length).split(/[\s，,。；;、！!？?]/u, 1)[0] : routedProject
+  if (project === undefined) return root
   const directory = project && project !== '.' && project !== '..' && !/[/\\\0]/u.test(project)
     ? canonicalDirectory(join(root, project)) : undefined
   if (!directory || directory === root || dirname(directory) !== root) {
@@ -304,7 +304,7 @@ export class DshExecutor implements Executor {
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
     const local = this.localDirectory()
-    const directory = local === undefined ? undefined : localWorkspace(local, sourceTrigger(this.host, ticket))
+    const directory = local === undefined ? undefined : localWorkspace(local, sourceTrigger(this.host, ticket), outcome.project)
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir, directory) }
   }
   /** Revalidate an existing local workspace before launch, including when a ticket resumes after a restart. */

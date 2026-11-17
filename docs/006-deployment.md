@@ -101,9 +101,9 @@ After the first start, edit machine limits in **Settings → Deployment** or the
 
 Set `localProjectDir` under the `dsh-superagent` configuration and enable the `dsh-superagent-feishu` entry. In **Sources**, configure the bot wrapper and add the target group in **@ only** mode. Add authorized users in **Policy**. In local mode the runtime accepts explicit group mentions from allowed users and uses the configured DSH model.
 
-If the workspace contains several projects, start the message after the mention with the folder name. For example, send `@Assistant 项目 sample-app。请运行单元测试并回复结果。` The worker opens the existing `sample-app` subfolder and sees its current uncommitted files. Replies go to the thread of the original Feishu message.
+If the workspace contains several projects, name the folder in the Feishu request. For example, send `@Assistant 请在 sample-app 仓库里运行单元测试。` The orchestrator passes `sample-app` as its project selection, and the worker opens that existing subfolder with its current uncommitted files. A leading `项目 sample-app` selector takes precedence when present. Replies go to the thread of the original Feishu message.
 
-Tickets for the same project wait for that workspace. Different project folders can run in parallel up to **Settings → Execution → Concurrent Tickets**. A message without a project selector uses the root, so its ticket needs all projects to be free.
+Tickets for the same project wait for that workspace. Different project folders can run in parallel up to **Settings → Execution → Concurrent Tickets**. A ticket with no resolved project uses the root, so it needs all projects to be free.
 
 The worker writes a user-facing Markdown answer alongside its internal report. Superagent sends that answer to the original Feishu thread or the human follow-up it answers. The worker conversation displays the original request and the answer, with the routing fields and execution steps available in the details.
 

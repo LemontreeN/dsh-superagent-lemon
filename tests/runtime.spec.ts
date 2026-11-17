@@ -128,11 +128,11 @@ async function route(item: Record<string, unknown>): Promise<Record<string, unkn
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
-async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归'), note?: string) {
+async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归'), note?: string, project?: string) {
   await receive(trigger)
   expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
-    worktree_name: worktreeName, acknowledgement: '收到，修复回归。', ...(note ? { note } : {}) })
+    worktree_name: worktreeName, acknowledgement: '收到，修复回归。', ...(note ? { note } : {}), ...(project ? { project } : {}) })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   return { trigger, ticket, sessionId: `worker-${ticket.id}` }
 }
@@ -341,6 +341,30 @@ it('dispatches different local projects around a deep same-project queue up to t
   expect(sameProject.slice(1).map(stage)).toEqual(Array(16).fill('pending'))
 })
 
+it('uses the inferred project for local Feishu sessions and queues, with the original explicit selector taking priority', async () => {
+  const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+  const sampleApp = join(root, 'sample-app'), reporting = join(root, 'reporting')
+  mkdirSync(sampleApp); mkdirSync(reporting)
+  const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+    feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false } })
+  await next.ready
+  next.sources.register(feishuKind)
+
+  const first = await acceptedTicket(feishu('1', '<at user_id="ou_bot"></at> 给你派个小任务：在 sample-app 仓库里查一下最近一次提交。'), undefined, ' sample-app ')
+  expect(first.ticket.execution?.directory).toBe(sampleApp)
+  expect(controller.create.mock.calls.find(([args]) => args.sessionId === first.sessionId)?.[0].workspaceId).toBe(sampleApp)
+  expect(first.ticket.assignments.at(-1)?.state).toBe('running')
+
+  const same = await acceptedTicket(feishu('2', '@bot 顺便查一下 sample-app 的 go.mod。'), undefined, 'sample-app')
+  expect(same.ticket.execution?.directory).toBe(sampleApp)
+  expect(same.ticket.assignments.at(-1)?.state).toBe('pending')
+
+  const other = await acceptedTicket(feishu('3', '@bot 项目 reporting。和 sample-app 对比一下。'), undefined, 'sample-app')
+  expect(other.ticket.execution?.directory).toBe(reporting)
+  expect(other.ticket.assignments.at(-1)?.state).toBe('running')
+  expect((await api('GET', 'state')).body).toMatchObject({ load: { running: 2, queued: 1 } })
+})
+
 it('reserves the entire local root for a worker whose request does not select a project', async () => {
   const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
   mkdirSync(join(root, 'widgets'))
@@ -463,7 +487,7 @@ describe('worker-authored local Feishu replies', () => {
   })
 })
 
-it('refuses missing or escaping project selectors without acknowledging them', async () => {
+it.each(['original request', 'project field'])('refuses missing or escaping project selectors from the %s without acknowledging them', async selector => {
   const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
   const outside = realpathSync(mkdtempSync(join(directory, 'outside-')))
   const project = join(root, 'widgets')
@@ -475,7 +499,8 @@ it('refuses missing or escaping project selectors without acknowledging them', a
   next.sources.register(feishuKind)
 
   for (const [index, name] of ['missing', '.', '..', '../outside', outside, 'external'].entries()) {
-    await expect(acceptedTicket(feishu(String(index + 1), `@bot 项目：${name}。修一下回归`)))
+    const text = selector === 'original request' ? `@bot 项目：${name}。修一下回归` : '@bot 修一下回归。'
+    await expect(acceptedTicket(feishu(String(index + 1), text), undefined, selector === 'project field' ? name : undefined))
       .rejects.toThrow('must name an existing folder directly under the configured local root')
   }
   expect(next.store.tickets.list()).toHaveLength(0)
