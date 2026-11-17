@@ -27,6 +27,8 @@ interface Handler<K extends EffectKind> {
   run: (payload: EffectPayloads[K], key: string) => Promise<void>
   /** How many may run at once now; 0 holds the kind, such as while processing is paused. */
   limit: () => number
+  /** Whether this due row can use an available slot. A held row stays queued while other rows may start. */
+  eligible?: (payload: EffectPayloads[K]) => boolean
   /** Initial and maximum retry backoff delays, in milliseconds. */
   retry: readonly [number, number]
   /** Effects run one at a time in queue order, and a failed one holds back later rows of the same kind. */
@@ -34,7 +36,7 @@ interface Handler<K extends EffectKind> {
   /** When true, repeated failures do not mark the effect kind's health entry as `error` (used when failures are already surfaced on a ticket). */
   quiet: boolean
 }
-type Options<K extends EffectKind> = Partial<Pick<Handler<K>, 'limit' | 'retry' | 'ordered' | 'quiet'>>
+type Options<K extends EffectKind> = Partial<Pick<Handler<K>, 'limit' | 'eligible' | 'retry' | 'ordered' | 'quiet'>>
 /** `seq` preserves the row's queue position; `generation` increments on payload updates so a running attempt does not delete a newer payload. */
 interface Row { key: string; value: string; seq: number; generation: number; attempts: number; due: number }
 type Task = { kind: EffectKind; key: string; done: Promise<void> }
@@ -67,8 +69,8 @@ export class Effects {
   handle<K extends EffectKind>(kind: K, run: Handler<K>['run'], options: Options<K> = {}): void {
     if (this.handlers.has(kind)) throw new Error(`The ${kind} effects already have a handler`)
     this.health.set(kind, this.board.claim(kind))
-    const { limit = () => 1, retry = [2000, 60_000], ordered = false, quiet = false } = options
-    this.handlers.set(kind, { run, limit: ordered ? () => Math.min(1, limit()) : limit, retry, ordered, quiet } as unknown as Handler<never>)
+    const { limit = () => 1, eligible, retry = [2000, 60_000], ordered = false, quiet = false } = options
+    this.handlers.set(kind, { run, limit: ordered ? () => Math.min(1, limit()) : limit, eligible, retry, ordered, quiet } as unknown as Handler<never>)
     this.report(kind)
     this.kick()
   }
@@ -106,15 +108,19 @@ export class Effects {
       try {
         const running = new Set([...this.tasks].filter(task => task.kind === kind).map(task => task.key))
         // Ordered kinds block behind their oldest row even when it is not yet due; limit() is queried only after ready rows exist.
-        const rows = (handler.ordered
-          ? this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? ORDER BY seq LIMIT 1').all(kind)
-          : this.store.db.prepare('SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ? AND due <= ? ORDER BY seq LIMIT ?')
-            .all(kind, this.now(), 16 + running.size)) as unknown as Row[]
-        const ready = handler.ordered && running.size ? [] : rows.filter(row => row.due <= this.now() && !running.has(row.key))
+        const fields = 'SELECT key, value, seq, generation, attempts, due FROM effect WHERE kind = ?'
+        const due = `${fields} AND due <= ? ORDER BY seq`
+        const at = this.now()
+        const rows = (handler.ordered ? this.store.db.prepare(`${fields} ORDER BY seq LIMIT 1`).all(kind)
+          : handler.eligible ? this.store.db.prepare(due).all(kind, at)
+          : this.store.db.prepare(`${due} LIMIT ?`).all(kind, at, 16 + running.size)) as unknown as Row[]
+        const ready = handler.ordered && running.size ? [] : rows.filter(row => row.due <= at && !running.has(row.key))
         let room = ready.length ? handler.limit() - running.size : 0
         for (const row of ready) {
-          if (room-- <= 0) break
+          if (room <= 0) break
+          if (handler.eligible && !handler.eligible(JSON.parse(row.value) as never)) continue
           this.run(kind, handler, row)
+          room--
         }
         if (this.broken.delete(kind)) this.report(kind)
       } catch (error) { this.failed(kind, error) }

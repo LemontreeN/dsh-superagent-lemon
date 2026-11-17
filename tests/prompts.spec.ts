@@ -75,6 +75,18 @@ it('leaves the UI before-and-after evidence to the delivery requirements, which 
   for (const role of ['orchestrator', 'worker'] as const) expect(composePrompt(config, role)).not.toContain('Before and After visual evidence')
 })
 
+it('asks local workers for a complete public reply while preserving team overrides and repository prompts', () => {
+  const config = defaultPrompts()
+  const local = composePrompt(config, 'worker', undefined, undefined, '/projects')
+  expect(local).toContain('reply_markdown containing the complete answer')
+  expect(local).toContain('Include the useful findings, concrete examples, and qualifications')
+  expect(local).not.toContain('100 words is a hard ceiling')
+  expect(composePrompt(config, 'orchestrator', undefined, undefined, '/projects')).toContain('The host delivers worker-authored reply_markdown')
+  expect(composePrompt(config, 'worker')).not.toContain('reply_markdown')
+  expect(composePrompt({ ...config, communication: 'Use our house style.' }, 'worker', undefined, undefined, '/projects'))
+    .toContain('Use our house style.')
+})
+
 it.each(['orchestrator', 'worker'] as const)('ends the %s prompt with the fixed handoff rules and the execution environment, and the main Session\'s with its Policy', role => {
   withStore(store => {
     const prompts = promptsOf(store)
@@ -120,6 +132,25 @@ it('registers the built-in Source skills, Feishu only with a Feishu bot, before 
     expect(skills[1]![1]).toContain('## CLI usage')
     expect(skills[2]![1]).toBe('Tag releases.')
     expect(new Prompts(store, () => 100000, variables, () => false).skills(config).map(([name]) => name)).toEqual(['github', 'release'])
+  })
+})
+
+it('describes local delivery in both roles without rewriting stored prompt revisions', () => {
+  withStore((store, dir) => {
+    const prompts = new Prompts(store, () => 100000, () => [], () => true, dir)
+    const config = { ...defaultPrompts(), communication: 'Keep replies short.' }
+    prompts.save(config, 0, 'panel')
+    expect(prompts.current().config).toEqual(config)
+    expect(prompts.skills(config).map(([name]) => name)).toEqual(['feishu'])
+    const preview = prompts.preview(config)
+    expect(preview.orchestrator).toContain('originating Feishu thread')
+    expect(preview.orchestrator).toContain('exact project subfolder named by the sender in the routing note')
+    expect(preview.worker).toContain('Use DSH_SUPERAGENT_DIR as the Session working directory')
+    expect(preview.worker).toContain('one human_action question asking which subfolder to use before editing')
+    expect(preview.worker).toContain('Preserve pre-existing changes')
+    expect(preview.worker).toContain('without committing, pushing, or publishing code')
+    expect(preview.worker).not.toContain('git filter-branch')
+    expect(preview.worker).toBe(prompts.compose(config, 'worker'))
   })
 })
 

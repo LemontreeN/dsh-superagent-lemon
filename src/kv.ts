@@ -13,6 +13,7 @@ export type Key<V> = string & { readonly __value?: V }
 export type Family<V, A extends unknown[]> = ((...name: A) => Key<V>) & { readonly prefix: string }
 /** Define a single typed KV key; external Source plugins use `record` and `family` to type their own keys. */
 export const record = <V>(key: string) => key as Key<V>
+type FeishuActivityIndicator = { id: string; retryAt?: number } | false
 /** Define a KV key family whose keys join `prefix` and name parts with `:` (or a custom `format`). */
 export function family<V, A extends unknown[] = [string]>(prefix: string, format = (...name: A) => name.join(':')): Family<V, A> {
   return Object.assign((...name: A) => `${prefix}${format(...name)}` as Key<V>, { prefix })
@@ -54,5 +55,7 @@ export const KV = {
    */
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
-    seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+    seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:'),
+    activity: family<{ triggerId: string; messageId: string; cardAfter: number; reaction?: FeishuActivityIndicator | undefined;
+      card?: FeishuActivityIndicator | undefined }>('feishu-activity:') },
 }

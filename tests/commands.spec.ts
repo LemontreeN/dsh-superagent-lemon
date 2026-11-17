@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
+import { requireGithub } from '../src/deployment.ts'
 import { CliError, Commands, commandError } from '../src/infra/commands.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
@@ -12,7 +13,7 @@ import { testDeployment } from './fixtures/deployment.ts'
 const sources = new SourceRegistry(() => SettingsSchema.parse({}))
 sources.register(feishuKind); sources.register(githubKind)
 const send = (commands: Commands, message: OutboundMessage) => sources.send(message, commands)
-const deployment = testDeployment({ github: { ...testDeployment().github, cli: '/path/agent-gh' } })
+const deployment = testDeployment({ github: { ...requireGithub(testDeployment()), cli: '/path/agent-gh' } })
 const REPOSITORY = deployment.repository
 const reply = { id: 'stable-operation', channel: githubChannel(8), text: 'Done', kind: 'reply' as const }
 describe('account-isolated operations', () => {

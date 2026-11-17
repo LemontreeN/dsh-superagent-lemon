@@ -5,8 +5,8 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
-- **Optional:** a Feishu bot for chat requests.
+- **For GitHub work**, an agent account with a dedicated GitHub CLI. The agent comments, pushes branches and opens pull requests as that account.
+- **For Feishu work**, a bot for chat requests. A local workspace can receive these requests through the bot.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
 
@@ -21,8 +21,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- For GitHub work, GitHub CLI (`gh`) 2.48 or later and a repository on github.com. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
@@ -93,9 +92,22 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `localProjectDir` | no | Absolute path to the local project root for Feishu assignments. Workers use the existing files and share the configured concurrency limit |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+
+### Local work from Feishu
+
+Set `localProjectDir` under the `dsh-superagent` configuration and enable the `dsh-superagent-feishu` entry. In **Sources**, configure the bot wrapper and add the target group in **@ only** mode. Add authorized users in **Policy**. In local mode the runtime accepts explicit group mentions from allowed users and uses the configured DSH model.
+
+If the workspace contains several projects, start the message after the mention with the folder name. For example, send `@Assistant 项目 sample-app。请运行单元测试并回复结果。` The worker opens the existing `sample-app` subfolder and sees its current uncommitted files. Replies go to the thread of the original Feishu message.
+
+Tickets for the same project wait for that workspace. Different project folders can run in parallel up to **Settings → Execution → Concurrent Tickets**. A message without a project selector uses the root, so its ticket needs all projects to be free.
+
+The worker writes a user-facing Markdown answer alongside its internal report. Superagent sends that answer to the original Feishu thread or the human follow-up it answers. The worker conversation displays the original request and the answer, with the routing fields and execution steps available in the details.
+
+The **Recover missed messages** option controls recovery of missed group and thread messages. Turn it off if the bot is configured for live mentions and lacks message-history access.
 
 ## Start and stop
 

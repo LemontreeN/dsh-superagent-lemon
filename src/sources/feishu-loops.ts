@@ -3,8 +3,9 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
-import { threadKey, type Thread, type Trigger } from '../core/index.ts'
+import { threadKey, type ReceiveResult, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
+import { runFeishuActivity, trackFeishuActivity } from './feishu-activity.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
@@ -15,21 +16,22 @@ import { KV } from '../kv.ts'
 import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
 import type { FeishuConfig } from './feishu.ts'
 
-export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
-  Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
+export const runFeishu = (ctx: SourceContext, signal: AbortSignal, warn?: (error: unknown) => void): Promise<unknown> =>
+  Promise.allSettled([watch(ctx, signal), backfillLoop(ctx, signal), chatNamesLoop(ctx, signal), runFeishuActivity(ctx, signal, warn)])
 const enabled = (ctx: SourceContext): FeishuConfig | undefined => ctx.config<FeishuConfig>(SOURCE)
 const bot = (ctx: SourceContext): FeishuBot => {
   const resolved = ctx.deployment.feishu
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
   return resolved
 }
-async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
-  await ctx.receive(trigger)
+async function receive(ctx: SourceContext, trigger: Trigger): Promise<ReceiveResult> {
+  const result = await ctx.receive(trigger)
   const chatId = String(trigger.meta.chatId ?? '')
-  if (!chatId) return
+  if (!chatId) return result
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId
   const chat = trigger.meta.direct === true ? { value: { zh: '私聊', en: 'Direct message' } } : { value: name }
   for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { url: chatLink(ctx, chatId), facts: { chat } })
+  return result
 }
 const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(ctx.deployment.feishu?.brand ?? 'feishu', chatId)
 function available(ctx: SourceContext): boolean {
@@ -92,7 +94,7 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       const chats = ctx.state.get(KV.feishu.chats) ?? {}
       chats[String(trigger.meta.chatId)] = trigger.meta.direct === true
       ctx.state.set(KV.feishu.chats, chats)
-      await receive(ctx, trigger)
+      if (await receive(ctx, trigger) === 'stored') trackFeishuActivity(ctx, trigger)
     }).catch(error => { ctx.report('feishu', { state: 'error', detail: String(error) }) })
   })
   try {
@@ -130,8 +132,8 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
   if (!available(ctx)) { ctx.report('history', health('paused', 'feishuBotMissing')); return }
   while (!signal.aborted) {
     const config = enabled(ctx)
-    if (!config) {
-      ctx.report('history', health('paused', 'sourceOff'))
+    if (!config?.recoverHistory) {
+      ctx.report('history', health('paused', config ? 'feishuHistoryDisabled' : 'sourceOff'))
       await delay(60_000, undefined, { signal }).catch(() => {})
       continue
     }

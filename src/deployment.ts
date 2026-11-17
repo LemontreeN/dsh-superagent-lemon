@@ -1,6 +1,6 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
-import { accessSync, constants, statSync } from 'node:fs'
+import { accessSync, constants, realpathSync, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
@@ -14,6 +14,7 @@ const absolute = (description: string) => s.string().pattern(/^\//).description(
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
+  localProjectDir: absolute('Existing project directory for local Feishu assignments.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
@@ -24,6 +25,7 @@ export const Config = s.object({
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
+  localProjectDir?: string
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
@@ -38,8 +40,8 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, localProjectDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, ...(localProjectDir === undefined ? {} : { localProjectDir }) }
 }
 
 export const GithubAccountsSchema = z.object({
@@ -52,10 +54,15 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 
 export interface Deployment extends Machine {
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  github?: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+
+export function requireGithub(deployment: Pick<Deployment, 'github'>): NonNullable<Deployment['github']> {
+  if (!deployment.github) throw new Error('GitHub is unavailable in local project mode.')
+  return deployment.github
+}
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -83,9 +90,20 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
+/** Resolve a local project or verify the agent's GitHub identity and push access. */
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
-  const { stateDir } = machine
+  const { stateDir, localProjectDir } = machine
+  if (localProjectDir !== undefined) {
+    try {
+      if (!isAbsolute(localProjectDir)) throw new Error('Expected an absolute path.')
+      const directory = realpathSync(localProjectDir)
+      if (!statSync(directory).isDirectory()) throw new Error('Expected a directory.')
+      accessSync(directory, constants.R_OK | constants.W_OK | constants.X_OK)
+      return { ...machine, repository: '', localProjectDir: directory }
+    } catch {
+      throw new SetupError('localProjectUnavailable', { directory: localProjectDir })
+    }
+  }
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
   if (!remote) throw new SetupError('repositoryUnset')

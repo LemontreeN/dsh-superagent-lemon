@@ -13,6 +13,7 @@ export const HEALTH_TEXT = {
   sourceOff: 'Off',
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
+  feishuHistoryDisabled: 'History recovery is off',
   pollFailures: '{count} consecutive failed polls; last: {error}',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
@@ -40,6 +41,8 @@ export interface SourceContext {
   config<C extends Record<string, unknown>>(kind: string): C | undefined
   /** Ingests a trigger into the Engine and schedules the next evaluation pass; callers should await completion before advancing read cursors. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
+  /** Whether a stored trigger is waiting for evaluation or being handled by a ticket. */
+  processing(trigger: Trigger): boolean
   atomic<T>(work: () => T): T
   /** Source-scoped KV records (such as read cursors); setting `undefined` removes an entry. */
   state: { get<V>(key: Key<V>): V | undefined; set<V>(key: Key<V>, value: V | undefined): void; keys<V>(family: Family<V, never>): Key<V>[] }

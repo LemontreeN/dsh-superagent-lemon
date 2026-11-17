@@ -30,13 +30,13 @@ export interface SetupState {
 export const problemOf = (id: string, setup: SetupState) => [setup.problem, setup.feishuProblem].find(problem => problem?.place === id)
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
-function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {
+function sourceState(instance: SourceInstance & { installed: boolean }, parts: Health[], setup: SetupState): SourceState {
   if (!instance.installed) return 'missing'
   if (!instance.enabled) return 'off'
   if (problemOf(instance.id, setup) || parts.some(part => part.state === 'error')) return 'error'
   if (setup.problem) return 'setup'
   if (parts.some(part => part.state === 'starting')) return 'starting'
-  return parts.some(part => part.state === 'paused') ? 'paused' : 'ready'
+  return parts.some(part => part.state === 'paused' && part.code !== 'feishuHistoryDisabled') ? 'paused' : 'ready'
 }
 export function sourcesStatus(host: ViewHost, health: HealthMap, setup: SetupState) {
   const { store, sources } = host

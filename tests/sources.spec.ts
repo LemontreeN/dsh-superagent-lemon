@@ -5,6 +5,7 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
+import { syncFeishuActivity, trackFeishuActivity } from '../src/sources/feishu-activity.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -90,6 +91,40 @@ function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): st
 }
 const bare = (reads: string[]) => reads.map(path => path.split('?')[0])
 describe('feishu source', () => {
+  it('shows a reaction through evaluation and dispatch, and updates the delayed Working card when work is blocked', async () => {
+    const h = host()
+    const signal = new AbortController().signal
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    const lark = vi.spyOn(h.commands, 'lark').mockResolvedValue({ reaction_id: 'reaction-1', message_id: 'om_status' })
+    const trigger = feishuTrigger({ message_id: 'om_work', chat_id: 'oc_team', chat_type: 'group', sender_id: MEMBER,
+      sender_type: 'user', content: '@bot fix', create_time: String(Date.now()), mentions: [{ id: 'ou_bot' }] }, 'ou_bot', 'cli_bot')!
+    expect(await h.receive(trigger)).toBe('stored')
+    trackFeishuActivity(h, trigger)
+    await syncFeishuActivity(h, signal)
+    expect(lark).toHaveBeenCalledExactlyOnceWith(['im', 'reactions', 'create',
+      '--params', '{"message_id":"om_work"}', '--data', '{"reaction_type":{"emoji_type":"Typing"}}'])
+
+    const decision = h.engine.decide(trigger.id, { kind: 'accept', title: 'Fix', scope: 'repo', reason: 'Requested' })
+    await syncFeishuActivity(h, signal)
+    expect(lark).toHaveBeenCalledTimes(1)
+
+    const activityKey = KV.feishu.activity(trigger.id)
+    h.store.set(activityKey, { ...h.store.get(activityKey)!, cardAfter: 0 })
+    await syncFeishuActivity(h, signal)
+    const cardReply = lark.mock.calls[1]![0]
+    expect(cardReply).toEqual(expect.arrayContaining(['+messages-reply', 'om_work', '--reply-in-thread', 'interactive']))
+    expect(JSON.parse(cardReply[cardReply.indexOf('--content') + 1]!)).toMatchObject({ schema: '2.0', config: { summary: { content: 'Working' } } })
+
+    h.engine.report(decision.ticketId!, { state: 'blocked', summary: 'Needs clarification' })
+    await syncFeishuActivity(h, signal)
+    expect(lark).toHaveBeenNthCalledWith(3, ['im', 'reactions', 'delete',
+      '--params', '{"message_id":"om_work","reaction_id":"reaction-1"}'])
+    const update = lark.mock.calls[3]![0]
+    expect(update.slice(0, 4)).toEqual(['api', 'PATCH', '/open-apis/im/v1/messages/om_status', '--data'])
+    expect(JSON.parse(JSON.parse(update[4]!).content)).toMatchObject({ config: { summary: { content: '处理结束' } } })
+    expect(h.store.get(activityKey)).toBeUndefined()
+    h.store.close()
+  })
   it('registers its kind without a bot, and names on its health what setup still needs', async () => {
     const run = async (overrides: Partial<SourceContextDeps>) => {
       // The fixture's registry already holds the kind; this one starts empty so the plugin's registration shows.
@@ -1108,6 +1143,31 @@ describe('feishu event consumer', () => {
     await new Promise(resolve => setTimeout(resolve, 300))
     expect(store.triggers.get(feishuTriggerId('om_9'))).toBeUndefined()
     controller.abort(); await running; store.close()
+  }, 20_000)
+  it('keeps live events and chat names when history recovery is off', async () => {
+    writeFileSync(join(dir, 'events'), event('om_live', 'oc_group', 'group') + '\n')
+    const { ctx, health, store } = consumerSource(cli('events'), {
+      chats: [{ chatId: 'oc_group', listen: 'mentions' }], recoverHistory: false,
+    })
+    const cursor = new Date(Date.now() - 3_600_000).toISOString()
+    store.set(KV.feishu.history('oc_group'), cursor)
+    const lark = vi.spyOn(Commands.prototype, 'lark').mockImplementation(async args => {
+      if (args[1] === 'reactions') return { reaction_id: 'reaction-live' }
+      if (args[1] !== '+chat-list') throw new Error('Unexpected history request')
+      return { chats: [{ chat_id: 'oc_group', name: 'Test group' }] }
+    })
+    running = runFeishu(ctx, controller.signal)
+    try {
+      await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_live'))).toBeDefined(), until)
+      expect(health.feishu).toMatchObject({ state: 'ready' })
+      expect(health.history).toMatchObject({ state: 'paused', code: 'feishuHistoryDisabled' })
+      expect(store.get(KV.sources.labels('feishu'))).toEqual({ oc_group: 'Test group' })
+      expect(store.get(KV.feishu.history('oc_group'))).toBe(cursor)
+      expect(lark.mock.calls.filter(([args]) => args[1] === '+chat-list')).toHaveLength(1)
+      expect(lark.mock.calls.every(([args]) => args[1] === '+chat-list' || args[1] === 'reactions')).toBe(true)
+    } finally {
+      controller.abort(); await running; lark.mockRestore(); store.close()
+    }
   }, 20_000)
   it('keeps a chat\'s history cursor when its read fails, and recovers known direct chats only while direct messages are on', async () => {
     const hour = new Date(Date.now() - 3_600_000).toISOString()

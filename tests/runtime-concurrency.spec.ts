@@ -850,6 +850,30 @@ it('ends a worker\'s turn only when the stop that ended its Assignment commits',
 })
 
 describe('the Executor\'s parts', () => {
+  it('serializes people\'s follow-ups and new launches in a shared project', () => {
+    const running = ['t1']
+    const slots = new WorkerSlots(() => running, () => 1, false)
+    expect(slots.hasOther('t1')).toBe(false)
+    expect(slots.hasOther('t2')).toBe(true)
+    expect(() => slots.reserve('t2', 'person')).toThrow(Later)
+    running.pop()
+    slots.reserve('t2', 'person')
+    expect(() => slots.reserve('t3', 'launch')).toThrow(Later)
+  })
+  it('blocks launches and follow-up wakes for the same local project and uses the remaining slots for other projects', () => {
+    const running = ['a1']
+    const project = new Map([['a1', 'a'], ['a2', 'a'], ['b1', 'b'], ['b2', 'b'], ['c1', 'c'], ['d1', 'd']])
+    const slots = new WorkerSlots(() => running, () => 3, false, (left, right) => project.get(left) === project.get(right))
+    expect(() => slots.reserve('a2', 'launch')).toThrow(Later)
+    expect(() => slots.reserve('a2', 'person')).toThrow(Later)
+    slots.reserve('b1', 'launch')
+    expect(() => slots.reserve('b2', 'wake')).toThrow(Later)
+    slots.reserve('c1', 'launch')
+    expect(() => slots.reserve('d1', 'person')).toThrow(Later)
+    running.pop()
+    slots.reserve('a2', 'person')
+    expect(slots.used()).toBe(3)
+  })
   it('holds one worker slot per ticket that runs or starts, and lets launches take the slots no worker or wake holds', () => {
     const running = ['t1']
     const slots = new WorkerSlots(() => running, () => 3)

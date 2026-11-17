@@ -47,6 +47,11 @@ const TEXT = {
   'health.evals': ['未完成的评估', 'Unavailable Evals'],
   none: ['暂无。', 'None.'],
   openSession: ['打开 Session', 'Open Session'],
+  workerRequest: ['飞书请求', 'Feishu request'],
+  workerRequestSource: ['查看飞书原文', 'Open original in Feishu'],
+  workerRequestDetails: ['派单详情', 'Assignment details'],
+  workerReply: ['执行器回复', 'Worker reply'],
+  workerReport: ['执行报告', 'Worker report'],
   stop: ['停止', 'Stop'],
   policyVersion: ['策略版本', 'Policy version'],
   mediaMarker: ['[媒体]', '[Media]'],
@@ -540,6 +545,8 @@ const TEXT = {
   'promptRole.orchestrator': ['主 Session', 'Main Session'],
   'promptRole.worker': ['执行器 Session', 'Executor Session'],
   // Deployment
+  deploymentLocalProject: ['本地项目目录', 'Local project directory'],
+  deploymentLocalProjectHint: ['填写 Mac 上项目的绝对路径。飞书任务会在这个目录依次执行，包括现有未提交改动。', 'Use the absolute path of the project on this Mac. Feishu tasks run one at a time in this directory, with any uncommitted changes.'],
   deploymentIntro: ['这台机器上的 dsh-superagent 设置，存放在 DSH 配置文件的 dsh-superagent 条目里；保存后立即生效，不会重启 dsh-superagent。', 'dsh-superagent\'s settings on this machine, kept in the dsh-superagent entry of the DSH configuration; a saved change applies at once, without restarting dsh-superagent.'],
   deploymentUnavailable: ['dsh-superagent 启动完成后才能修改这些值。', 'These values can be changed once dsh-superagent has started.'],
   deploymentDerived: ['仓库与账号', 'Repository and accounts'],
@@ -728,6 +735,7 @@ const TEXT = {
   'setup.repositoryUnset': ['GitHub 来源没有设置监听的仓库。', SETUP_PROBLEMS.repositoryUnset[1]],
   'setup.foreignFile': ['{file} 不是 dsh-superagent 写入的文件；移走它，或换一个状态目录。', SETUP_PROBLEMS.foreignFile[1]],
   'setup.gitTooOld': ['git 没有读取 dsh-superagent 为 github.com 写的凭据配置；需要 git 2.32 或更新版本。', SETUP_PROBLEMS.gitTooOld[1]],
+  'setup.localProjectUnavailable': ['无法访问本地项目目录 {directory}。', SETUP_PROBLEMS.localProjectUnavailable[1]],
   'setup.environmentFailed': ['准备智能体的运行环境失败。', SETUP_PROBLEMS.environmentFailed[1]],
   'setup.agentCliUnset': ['没有设置智能体的 GitHub CLI。', SETUP_PROBLEMS.agentCliUnset[1]],
   'setup.agentCliMissing': ['找不到智能体的 GitHub CLI。', SETUP_PROBLEMS.agentCliMissing[1]],
@@ -745,6 +753,7 @@ const TEXT = {
   'healthCode.sourceOff': ['已关闭', HEALTH_TEXT.sourceOff],
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
+  'healthCode.feishuHistoryDisabled': ['已关闭历史消息补收', HEALTH_TEXT.feishuHistoryDisabled],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT

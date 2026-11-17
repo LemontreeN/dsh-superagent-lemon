@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -57,6 +57,20 @@ describe('configuration schema', () => {
 })
 
 describe('setup', () => {
+  it('uses a canonical local project directory without probing GitHub', async () => {
+    const project = join(dir, 'project')
+    symlinkSync(join(dir, 'widgets'), project)
+    const noProbe = vi.fn<Probe>()
+    const config = machineOf(Config(minimal({ localProjectDir: project })))
+    const deployment = await resolveDeployment(config, {}, noProbe, path)
+    expect(deployment.localProjectDir).toBe(realpathSync(project))
+    expect(deployment.github).toBeUndefined()
+    expect(noProbe).not.toHaveBeenCalled()
+    const missing = join(dir, 'missing')
+    await expect(resolveDeployment(machine({ localProjectDir: missing }), {}, noProbe))
+      .rejects.toMatchObject({ code: 'localProjectUnavailable', values: { directory: missing } })
+    expect(noProbe).not.toHaveBeenCalled()
+  })
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
     const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
     expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })

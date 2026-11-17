@@ -1,5 +1,6 @@
 /** Scoped runtime context exposed to each Source kind, isolating Sources from direct Store or Engine access. */
 import type { EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
+import { followupOwners, latestAssignment, readUntil, threadKey, ticketStage } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -9,7 +10,7 @@ import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
 
 export interface SourceContextDeps {
-  readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
+  readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'decisions' | 'read' | 'settings'>
   readonly outbox: Pick<Outbox, 'send'>
   readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'>
   readonly commands: Commands
@@ -44,6 +45,24 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       return instance?.enabled ? instance.config : undefined
     },
     receive: trigger => deps.receive(trigger),
+    processing: trigger => {
+      if (store.settings().paused) return false
+      const thread = store.threads.get(threadKey(trigger.threads[0]!))
+      if (thread?.pending.includes(trigger.id) || thread?.evaluating?.triggerIds.includes(trigger.id)) return true
+      const disposition = store.triggers.disposition(trigger.id)
+      const decision = disposition?.decisionId ? store.decisions.get(disposition.decisionId) : undefined
+      const owners = followupOwners(trigger, store)
+      if (decision?.kind === 'accept' && decision.ticketId) owners.push(decision.ticketId)
+      return owners.some(id => {
+        const ticket = store.tickets.get(id)
+        if (!ticket) return false
+        const stage = ticketStage(ticket).stage
+        if (stage === 'person' || stage === 'ended') return false
+        const assignment = latestAssignment(ticket)
+        const queued = ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === trigger.id && ticket.undelivered.includes(input.id))
+        return queued || (assignment?.deliveredAt ?? '') > readUntil(ticket, false) || (stage === 'working' && !assignment?.idleAt)
+      })
+    },
     atomic: work => store.atomic(work),
     state: {
       get: name => store.get(name),

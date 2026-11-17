@@ -1,6 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -13,6 +14,7 @@ import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
 import { masterPrompt } from '../src/app/context.ts'
 import { reference, testMachine } from './fixtures/deployment.ts'
+import { gitEnv } from './fixtures/git.ts'
 import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { TextCache } from '../src/app/cache.ts'
@@ -126,11 +128,11 @@ async function route(item: Record<string, unknown>): Promise<Record<string, unkn
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
-async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
+async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归'), note?: string) {
   await receive(trigger)
   expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
-    worktree_name: worktreeName, acknowledgement: '收到，修复回归。' })
+    worktree_name: worktreeName, acknowledgement: '收到，修复回归。', ...(note ? { note } : {}) })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
   return { trigger, ticket, sessionId: `worker-${ticket.id}` }
 }
@@ -203,7 +205,7 @@ beforeEach(async () => {
     inspect: vi.fn(async () => ({ events: [] })),
   }
   jobs = jobRegistry()
-  services = { agents, llm: { resolveCallConfig: vi.fn(async value => value) }, sessionController: controller, sessionPersistence: { flush: vi.fn(async () => {}), open: vi.fn(async () => ({ read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} })) }, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer: { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }, jobs: jobs.service }
+  services = { agents: Object.assign(agents, { list: () => [...agents.values()] }), llm: { resolveCallConfig: vi.fn(async value => value) }, sessionController: controller, sessionPersistence: { flush: vi.fn(async () => {}), open: vi.fn(async () => ({ read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} })) }, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer: { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }, jobs: jobs.service }
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT(), OTHER(), BOT()]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store); store.close()
@@ -238,6 +240,253 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
     thread: `feishu:${CHAT}:om_1`, text: trigger.text }) })
   expect(first.trigger).not.toHaveProperty('read')
   expect(await route({ kind: 'accept', trigger_id: trigger.id, title: 'again', worktree_name: worktreeName, acknowledgement: 'x' })).toMatchObject({ ticket: { ticket_id: ticket.id } })
+})
+
+it.each([
+  { format: 'mention placeholder', mention: '@_user_1', mentions: [{ id: 'ou_bot', key: '@_user_1', name: 'Codex助手' }] },
+  { format: 'rendered at tag', mention: '<at user_id="ou_bot"></at>', mentions: [{ id: 'ou_bot' }] },
+])('dispatches Feishu tasks with $format into the dirty checkout and waits for the previous worker to stop', async ({ mention, mentions }) => {
+  const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+  const project = join(root, 'widgets')
+  mkdirSync(project)
+  symlinkSync(project, join(root, 'widgets-alias'), 'dir')
+  const git = (...args: string[]) => execFileSync('git', ['-C', project, ...args], { env: gitEnv(), encoding: 'utf8' })
+  git('init', '-q')
+  writeFileSync(join(project, 'tracked.txt'), 'committed\n')
+  git('add', 'tracked.txt')
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'seed')
+  writeFileSync(join(project, 'tracked.txt'), 'existing local change\n')
+  writeFileSync(join(project, 'untracked.txt'), 'new local file\n')
+  controller.create.mockClear()
+  subprocess.spawn.mockClear()
+  const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+    feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false, otherChats: 'none' } })
+  await next.ready
+  next.sources.register(feishuKind)
+  expect(next.configured()).toBe(true)
+  expect(next.deployment.github).toBeUndefined()
+  await receive(feishu('99', '普通群消息', { mentions: [] }))
+  expect(relays(next.masterId)).not.toContainEqual(expect.objectContaining({ trigger_id: feishu('99', '').id }))
+  const first = await acceptedTicket(feishu('1', `${mention} 项目 widgets。修一下回归`, { mentions }), 'Project subfolder: widgets')
+  expect(first.ticket.execution).toMatchObject({ directory: project, assignment: expect.stringContaining('Project subfolder: widgets') })
+  const workspace = controller.create.mock.calls.find(([args]) => args.sessionId === first.sessionId)?.[0].workspaceId
+  expect(workspace).toBe(project)
+  expect(readFileSync(join(workspace, 'tracked.txt'), 'utf8')).toBe('existing local change\n')
+  expect(readFileSync(join(workspace, 'untracked.txt'), 'utf8')).toBe('new local file\n')
+  expect(git('status', '--short')).toContain(' M tracked.txt')
+  expect(subprocess.spawn.mock.calls.some(([spec]) => spec.argv.includes(AGENT()) || spec.argv[0] === 'sh')).toBe(false)
+  const job = jobs.run(first.sessionId, 'touch local files')
+  jobs.service.kill.mockImplementationOnce(() => 'requested')
+  const second = await acceptedTicket(feishu('2', '@bot 项目 widgets-alias。下一单'))
+  expect(second.ticket.execution?.directory).toBe(project)
+  const fallback = await acceptedTicket(feishu('3', '@bot 不指定项目的工单'), 'Project subfolder: widgets')
+  expect(fallback.ticket.execution?.directory).toBe(root)
+  expect(next.store.tickets.get(fallback.ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+  expect(next.store.tickets.get(second.ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+  if (existsSync(join(root, 'WIDGETS'))) {
+    const caseAlias = await acceptedTicket(feishu('4', '@bot 项目 WIDGETS。大写项目名'))
+    expect(next.store.tickets.get(caseAlias.ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+  }
+  await runTool(first.sessionId, 'orchestrator_report', { state: 'ready', summary: 'local changes checked' })
+  const agent = agents.get(first.sessionId)!
+  agent.status = 'idle'
+  await next.pump(); await next.idle()
+  expect(jobs.service.kill).toHaveBeenCalledWith(job, first.sessionId, expect.any(String))
+  expect(next.store.tickets.get(second.ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+  jobs.end(job, 'killed')
+  await vi.waitFor(() => expect(next.executor.activeCount()).toBe(0))
+  await next.pump(); await next.idle()
+  expect(next.store.tickets.get(second.ticket.id)?.assignments.at(-1)?.state).toBe('running')
+  expect(next.store.tickets.get(fallback.ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+  const calls = vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args)
+  expect(calls.find(args => args[1] === '+messages-reply')).toEqual(expect.arrayContaining(['--message-id', 'om_1', '--reply-in-thread']))
+})
+
+it('dispatches different local projects around a deep same-project queue up to the saved total limit', async () => {
+  const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+  const projects = ['widgets', 'api', 'client', 'docs', 'tools', 'report']
+  for (const project of projects) mkdirSync(join(root, project))
+  const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+    feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false } })
+  await next.ready
+  next.sources.register(feishuKind)
+  const settings = next.store.settings()
+  next.store.saveSettings({ ...settings, executor: { ...settings.executor, maxWorkers: 5 } })
+  const assign = (id: number, project: string) => acceptedTicket(feishu(String(id), `@bot 项目 ${project}。检查项目`))
+  type Assigned = Awaited<ReturnType<typeof assign>>
+  const stage = ({ ticket }: Assigned) => next.store.tickets.get(ticket.id)?.assignments.at(-1)?.state
+  const finish = async ({ ticket, sessionId }: Assigned) => {
+    next.engine.stopTicket(ticket.id)
+    agents.get(sessionId)!.status = 'idle'
+    await next.pump(); await next.idle()
+  }
+
+  const first = await assign(1, 'widgets')
+  const sameProject: Assigned[] = []
+  for (let id = 2; id <= 18; id++) sameProject.push(await assign(id, 'widgets'))
+  expect(sameProject.map(stage)).toEqual(Array(17).fill('pending'))
+
+  const unrelated: Assigned[] = []
+  for (const [index, project] of projects.slice(1).entries()) unrelated.push(await assign(19 + index, project))
+  expect(unrelated.map(stage)).toEqual(['running', 'running', 'running', 'running', 'pending'])
+  for (const { ticket } of unrelated.slice(0, 4)) expect(next.executor.mayUseWorkerTools(ticket.id)).toBe(true)
+  expect((await api('GET', 'state')).body).toMatchObject({ load: { running: 5, queued: 18, maxWorkers: 5 } })
+  expect((await api('GET', 'overview')).body).toMatchObject({ executor: { running: 5, queued: 18, maxWorkers: 5 } })
+
+  await finish(unrelated[0]!)
+  await vi.waitFor(() => expect(stage(unrelated.at(-1)!)).toBe('running'))
+  expect(sameProject.map(stage)).toEqual(Array(17).fill('pending'))
+  await finish(first)
+  await vi.waitFor(() => expect(stage(sameProject[0]!)).toBe('running'))
+  expect(sameProject.slice(1).map(stage)).toEqual(Array(16).fill('pending'))
+})
+
+it('reserves the entire local root for a worker whose request does not select a project', async () => {
+  const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+  mkdirSync(join(root, 'widgets'))
+  const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+    feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false } })
+  await next.ready
+  next.sources.register(feishuKind)
+  const unrestricted = await acceptedTicket(feishu('1', '@bot 不指定项目的工单'))
+  expect(unrestricted.ticket.execution?.directory).toBe(root)
+  const project = await acceptedTicket(feishu('2', '@bot 项目 widgets。检查项目'))
+  expect(project.ticket.assignments.at(-1)?.state).toBe('pending')
+  expect((await api('GET', 'state')).body).toMatchObject({ load: { running: 1, queued: 1, maxWorkers: 3 } })
+})
+
+it('waits to wake an idle local worker while another ticket uses its project', async () => {
+  const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+  for (const name of ['widgets', 'api']) mkdirSync(join(root, name))
+  const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+    feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false } })
+  await next.ready
+  next.sources.register(feishuKind)
+
+  const first = await acceptedTicket(feishu('1', '@bot 项目 widgets。检查项目'))
+  agents.get(first.sessionId)!.status = 'idle'
+  const owner = await acceptedTicket(feishu('2', '@bot 项目 widgets。另一张工单'))
+  expect(owner.ticket.assignments.at(-1)?.state).toBe('running')
+  const followup = feishu('3', '@bot 继续第一单', { root_id: 'om_1' })
+  const delivered = () => relays(first.sessionId).some(message => message.trigger_id === followup.id)
+  expect(await receive(followup)).toBe('stored')
+  expect(delivered()).toBe(false)
+  expect(next.executor.mayUseWorkerTools(first.ticket.id)).toBe(false)
+
+  const unrelated = await acceptedTicket(feishu('4', '@bot 项目 api。检查项目'))
+  expect(unrelated.ticket.assignments.at(-1)?.state).toBe('running')
+  next.engine.stopTicket(owner.ticket.id)
+  agents.get(owner.sessionId)!.status = 'idle'
+  await next.pump(); await next.idle()
+  await vi.waitFor(() => expect(delivered()).toBe(true))
+  expect(next.executor.mayUseWorkerTools(first.ticket.id)).toBe(true)
+})
+
+describe('worker-authored local Feishu replies', () => {
+  const sends = () => vi.mocked(Commands.prototype.lark).mock.calls.map(([args]) => args)
+    .filter(args => args[1] === '+messages-reply')
+  beforeEach(async () => {
+    const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+    const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+      feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false } })
+    await next.ready
+    next.sources.register(feishuKind)
+  })
+
+  it('delivers the original Markdown and prevents a second completion reply', async () => {
+    const { trigger, ticket, sessionId } = await acceptedTicket()
+    vi.mocked(Commands.prototype.lark).mockClear()
+    deliveries.mockClear()
+    const markdown = '# Verification\n\n' + 'check passed '.repeat(IM_WORDS) + '\n\n```go\nfmt.Println("ok")\n```\n'
+    const report = { state: 'ready', summary: 'Internal engineering record', reply_markdown: markdown }
+    expect(await runTool(sessionId, 'orchestrator_report', report))
+      .toMatchObject({ reported: true, notification: 'direct', delivery: 'sent', reused: false })
+    const receipt = key('worker-reply', trigger.id)
+    expect(sends()).toEqual([['im', '+messages-reply', '--message-id', 'om_1', '--msg-type', 'post',
+      '--content', JSON.stringify({ zh_cn: { content: [[{ tag: 'md', text: markdown }]] } }),
+      '--reply-in-thread', '--idempotency-key', receipt]])
+    expect(runtime.store.receipts.get(receipt)).toMatchObject({ status: 'sent', text: markdown, ticketId: ticket.id })
+    expect(runtime.store.tickets.get(ticket.id)?.assignments.at(-1)?.report)
+      .toMatchObject({ summary: report.summary, replyMarkdown: markdown })
+    expect(relays(runtime.masterId)).not.toContainEqual(expect.objectContaining({ kind: 'worker_report' }))
+    expect(await runTool(sessionId, 'orchestrator_report', report)).toMatchObject({ delivery: 'sent', reused: true })
+    expect(await runTool(runtime.masterId, 'orchestrator_reply', { purpose: 'result', ticket_id: ticket.id, text: 'Duplicate' }))
+      .toEqual({ status: 'sent' })
+    expect(sends()).toHaveLength(1)
+  })
+
+  it('targets the explicit human follow-up and reuses its first answer after completion', async () => {
+    const { ticket, sessionId } = await acceptedTicket()
+    const question = feishu('2', '@bot 具体改的是哪个文件？', { root_id: 'om_1' })
+    await receive(question)
+    expect(relays(sessionId)).toContainEqual(expect.objectContaining({ trigger_id: question.id }))
+    vi.mocked(Commands.prototype.lark).mockClear()
+    const report = { state: 'progress', summary: 'Answered follow-up', reply_to_trigger_id: question.id, reply_markdown: '改的是 `settings.go`。' }
+    expect(await runTool(sessionId, 'orchestrator_report', report)).toMatchObject({ delivery: 'sent', reused: false })
+    expect(sends()[0]?.slice(0, 4)).toEqual(['im', '+messages-reply', '--message-id', 'om_2'])
+    expect(await runTool(sessionId, 'orchestrator_report', { ...report, state: 'ready' }))
+      .toMatchObject({ notification: 'direct', delivery: 'sent', reused: true })
+    expect(runtime.store.tickets.get(ticket.id)?.ended?.outcome).toBe('completed')
+    for (const purpose of ['answer', 'result']) {
+      const target = purpose === 'answer' ? { trigger_id: question.id } : {}
+      expect(await runTool(runtime.masterId, 'orchestrator_reply', { purpose, ticket_id: ticket.id, text: 'Duplicate', ...target }))
+        .toEqual({ status: 'sent' })
+    }
+    expect(sends()).toHaveLength(1)
+  })
+
+  it('keeps the ticket open when a target or body is refused and supports the previous report path', async () => {
+    const { ticket, sessionId } = await acceptedTicket()
+    const unrelated = feishu('3', '@bot 不同的话题')
+    await receive(unrelated)
+    vi.mocked(Commands.prototype.lark).mockClear()
+    const report = { state: 'ready', summary: 'Done' }
+    await expect(runTool(sessionId, 'orchestrator_report', { ...report, reply_markdown: '无关', reply_to_trigger_id: unrelated.id }))
+      .rejects.toThrow('which reached this ticket')
+    await expect(runTool(sessionId, 'orchestrator_report', { ...report, reply_markdown: '详'.repeat(6000) }))
+      .rejects.toThrow('16 KiB')
+    await expect(runTool(sessionId, 'orchestrator_report', { ...report, reply_markdown: '"'.repeat(8000) }))
+      .rejects.toThrow('formatted Feishu reply is too large')
+    await expect(runTool(sessionId, 'orchestrator_report', { ...report, reply_markdown: '  ' }))
+      .rejects.toThrow('Provide the Markdown reply')
+    await expect(runTool(sessionId, 'orchestrator_report', { ...report, reply_markdown: '已处理', human_action: '需要确认吗？' }))
+      .rejects.toThrow('Use human_action by itself')
+    const unchanged = runtime.store.tickets.get(ticket.id)!
+    expect(unchanged.ended).toBeUndefined()
+    expect(unchanged.assignments.at(-1)?.report).toBeUndefined()
+    expect(sends()).toHaveLength(0)
+    expect(await runTool(sessionId, 'orchestrator_report', report)).toMatchObject({ notification: 'orchestrator' })
+    expect(relays(runtime.masterId)).toContainEqual(expect.objectContaining({ kind: 'worker_report', summary: 'Done' }))
+    expect(await runTool(runtime.masterId, 'orchestrator_reply', { purpose: 'result', ticket_id: ticket.id, text: '已处理。' }))
+      .toEqual({ status: 'sent' })
+    expect(sends()[0]).toEqual(expect.arrayContaining(['--message-id', 'om_1', '--markdown', '已处理。']))
+  })
+})
+
+it('refuses missing or escaping project selectors without acknowledging them', async () => {
+  const root = realpathSync(mkdtempSync(join(directory, 'local-projects-')))
+  const outside = realpathSync(mkdtempSync(join(directory, 'outside-')))
+  const project = join(root, 'widgets')
+  mkdirSync(project)
+  symlinkSync(outside, join(root, 'external'), 'dir')
+  const next = await restart({ localProjectDir: root }, { github: { repository: '', cli: '' },
+    feishu: { chats: [{ chatId: CHAT, listen: 'mentions' }], directMessages: false, otherChats: 'none' } })
+  await next.ready
+  next.sources.register(feishuKind)
+
+  for (const [index, name] of ['missing', '.', '..', '../outside', outside, 'external'].entries()) {
+    await expect(acceptedTicket(feishu(String(index + 1), `@bot 项目：${name}。修一下回归`)))
+      .rejects.toThrow('must name an existing folder directly under the configured local root')
+  }
+  expect(next.store.tickets.list()).toHaveLength(0)
+  expect(vi.mocked(Commands.prototype.lark).mock.calls.some(([args]) => args[1] === '+messages-reply')).toBe(false)
+
+  const accepted = await acceptedTicket(feishu('20', '@bot 项目：widgets。修一下回归'))
+  expect(accepted.ticket.execution?.directory).toBe(project)
+  expect(next.executor.mayUseWorkerTools(accepted.ticket.id)).toBe(true)
+  rmSync(project, { recursive: true })
+  symlinkSync(outside, project, 'dir')
+  expect(next.executor.mayUseWorkerTools(accepted.ticket.id)).toBe(false)
 })
 
 it('fans a person\'s later thread message out to the live worker as context and tells the orchestrator, without an Eval', async () => {

@@ -1,6 +1,7 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
-import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { latestAssignment, liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { workerReplyKey } from '../../core/replies.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -12,16 +13,20 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'receipts' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
-  readonly github: SourceContext
+  readonly github?: SourceContext | undefined
+  /** Local Feishu tickets can publish a worker-authored answer through the host Outbox. */
+  readonly localFeishuReplies?: boolean
   sendReplies(): Promise<void>
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
+  const github = host.github
+  const account = github?.deployment.github
   return [
     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
       true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, ticketId, signal)),
@@ -73,32 +78,67 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
     }),
     tool({
       name: 'orchestrator_report',
-      description: 'Report progress, ready, blocked, failed or dropped, as the work and handoff sections say.',
+      description: 'Report progress, ready, blocked, failed or dropped, as the work and handoff sections say.'
+        + (host.localFeishuReplies ? ' Provide the full user-facing result or direct answer in reply_markdown.' : ''),
       schema: z.object({
         state: z.enum(['progress', 'ready', 'blocked', 'failed', 'dropped']),
         summary: z.string().min(1),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
-        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
+        pr_number: z.number().int().positive().nullish().describe(account
+          ? `The ticket's PR: its source PR, or one by ${account.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`
+          : 'Omit for local work.'),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
+        ...host.localFeishuReplies ? {
+          reply_markdown: z.string().optional().describe('Exact user-facing Feishu Markdown, up to 16 KiB UTF-8. Use ready for a result or ready/progress with reply_to_trigger_id for a human follow-up. Keep internal evidence in summary.'),
+        } : {},
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
-        if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
-        const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
-        // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
-        return host.store.atomic(() => {
-          const refused = pull && claimPull(host.github, ticketId, pull)
+        if (!current) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+        if (args.pr_number != null && !github) throw new Error('Omit pr_number for local work.')
+        const answerTo = args.reply_to_trigger_id
+        const markdown = typeof args.reply_markdown === 'string' ? args.reply_markdown : undefined
+        if (markdown !== undefined) {
+          if (args.state !== 'ready' && !(args.state === 'progress' && answerTo)) {
+            throw new Error('Use reply_markdown with state=ready for a result, or state=progress with the follow-up trigger ID for a direct answer.')
+          }
+          if (answerTo !== undefined && !answerTo.trim()) throw new Error('Provide the original follow-up trigger ID or omit reply_to_trigger_id.')
+          if (answerTo === current.origin.triggerId) throw new Error('For the original request, use state=ready and omit reply_to_trigger_id.')
+          if (args.human_action) throw new Error('Use human_action by itself for a question. Deliver the final Markdown after it is resolved.')
+        }
+        const previous = markdown === undefined ? undefined : host.store.receipts.get(workerReplyKey(answerTo ?? current.origin.triggerId))
+        if (previous && previous.ticketId !== ticketId) throw new Error('A different worker already answered this Feishu request.')
+        if (previous && previous.text !== markdown) {
+          throw new Error('This Feishu request already has a direct reply. Keep its original reply_markdown to retry delivery, or submit only an internal status update.')
+        }
+        if (!liveTicket(current)) {
+          const final = latestAssignment(current)?.report
+          if (previous?.ticketId === ticketId && final?.state === args.state && final.replyMarkdown === markdown && final.replyTo === answerTo) {
+            return { reported: true, notification: 'direct', delivery: previous.status, reused: true }
+          }
+          throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+        }
+        const pull = github && args.pr_number != null ? await readPull(github, args.pr_number, signal) : undefined
+        // Keep the report and its delivery or relay in the same transaction.
+        const { result, delivery } = host.store.atomic(() => {
+          const refused = github && pull && claimPull(github, ticketId, pull)
           if (refused) throw new Error(refused)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
-            ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
+            ...(answerTo ? { answers: answerTo } : {}), ...(markdown === undefined ? {} : { replyMarkdown: markdown }) }
           const updated = host.engine.report(ticketId, report)
-          const relay = reportRelay(updated, report)
+          const delivery = markdown === undefined ? undefined : host.engine.reply({
+            purpose: answerTo ? 'answer' : 'result', ticketId, ...(answerTo ? { triggerId: answerTo } : {}), text: markdown, workerMarkdown: true,
+          })
+          const relay = delivery ? undefined : reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
-          const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
+          const notification = delivery ? 'direct' : relay ? 'orchestrator' : 'internal_only'
+          return { result: { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }, delivery }
         })
+        if (!delivery) return result
+        if (delivery.status === 'pending') await host.sendReplies()
+        return { ...result, delivery: host.store.replyStatus(delivery.id) ?? delivery.status, reused: delivery.reused }
       },
     }),
   ]
