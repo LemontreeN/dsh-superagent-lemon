@@ -147,16 +147,17 @@ function AnswerCard({ turn, t, renderFactorySlot }: { turn: Turn; t: T;
 }
 
 export function installWorkerConversation(ctx: Context, locale: string): void {
-  const conversation = ctx.get('uiConversation') as { events: {
-    register: (definition: typeof requestDefinition | typeof answerDefinition) => () => void
-  } } | undefined
-  if (!conversation) return
-  ctx.effect(() => conversation.events.register(requestDefinition), 'dsh-superagent: workspace task')
-  ctx.effect(() => conversation.events.register(answerDefinition), 'dsh-superagent: workspace reply')
-  const slots = ctx.slots as unknown as {
-    inject: (name: string, register: () => () => void) => void
-    register: (options: { name: string; locale: string; key?: string; id?: string }, renderer: Renderer) => () => void
-  }
-  slots.inject('conversation.chat.node', () => slots.register({ name: 'conversation.chat.node', key: REQUEST, locale }, RequestCard))
-  slots.inject('conversation.chat.turnTail', () => slots.register({ name: 'conversation.chat.turnTail', id: ANSWER, locale }, AnswerCard))
+  ctx.inject(['uiConversation'], scope => {
+    const conversation = scope.get('uiConversation') as { events: {
+      register: (definition: typeof requestDefinition | typeof answerDefinition) => () => void
+    } }
+    scope.effect(() => conversation.events.register(requestDefinition), 'dsh-superagent: workspace task')
+    scope.effect(() => conversation.events.register(answerDefinition), 'dsh-superagent: workspace reply')
+    const slots = scope.slots as unknown as {
+      inject: (name: string, register: () => () => void) => void
+      register: (options: { name: string; locale: string; key?: string; id?: string }, renderer: Renderer) => () => void
+    }
+    slots.inject('conversation.chat.node', () => slots.register({ name: 'conversation.chat.node', key: REQUEST, locale }, RequestCard))
+    slots.inject('conversation.chat.turnTail', () => slots.register({ name: 'conversation.chat.turnTail', id: ANSWER, locale }, AnswerCard))
+  })
 }

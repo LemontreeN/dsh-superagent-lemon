@@ -1,5 +1,6 @@
 import type { ComponentType, ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { Context } from '@deepseek-ai/cordis'
 import { expect, it, vi } from 'vitest'
 import { installWorkerConversation } from '../src/client/worker-conversation.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -16,17 +17,44 @@ type Definition = {
 function fixture() {
   const definitions: Definition[] = []
   const slots: ComponentType<Record<string, unknown>>[] = []
-  installWorkerConversation({
+  const ctx = {
+    inject: (_dependencies: string[], apply: (scope: unknown) => void) => { apply(ctx) },
     get: () => ({ events: { register: (definition: Definition) => definitions.push(definition) } }),
     effect: (callback: () => void) => callback(),
     slots: { inject: (_name: string, register: () => void) => register(),
       register: (_options: unknown, render: ComponentType<Record<string, unknown>>) => slots.push(render) },
-  } as never, 'dshSuperagent')
+  }
+  installWorkerConversation(ctx as never, 'dshSuperagent')
   return { request: definitions[0]!, answer: definitions[1]!, Request: slots[0]!, Answer: slots[1]! }
 }
 const t = (key: keyof typeof zh) => zh[key]
 const block = (text: string) => [{ type: 'text', text }]
 const reader = (hasFeishu: boolean) => ({ previous: () => hasFeishu ? {} : undefined })
+
+it('registers both workspace projections when the conversation service starts after Superagent', async () => {
+  const ctx = new Context()
+  const registerEvent = vi.fn((_definition: Definition) => () => {})
+  const registerSlot = vi.fn((_options: { name: string }, _renderer: unknown) => () => {})
+  ctx.reflect.provide('slots', { register: registerSlot, inject: (_name: string, register: () => void) => register() })
+  try {
+    await ctx.plugin({
+      inject: ['slots'],
+      apply(scope) { installWorkerConversation(scope, 'dshSuperagent') },
+    })
+    expect(registerEvent).not.toHaveBeenCalled()
+    expect(registerSlot).not.toHaveBeenCalled()
+
+    await ctx.plugin(scope => { scope.reflect.provide('uiConversation', { events: { register: registerEvent } }) })
+    await vi.waitFor(() => {
+      expect(registerEvent.mock.calls.map(([definition]) => definition.kind)).toEqual([
+        'dsh-superagent-worker-request', 'dsh-superagent-worker-answer',
+      ])
+      expect(registerSlot.mock.calls.map(([options]) => options.name)).toEqual(['conversation.chat.node', 'conversation.chat.turnTail'])
+    })
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
 
 it('shows Feishu source prose before the raw dispatch details and leaves unrelated notices with DSH', () => {
   const { request, Request } = fixture()
